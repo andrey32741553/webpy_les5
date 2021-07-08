@@ -12,11 +12,8 @@ import psycopg2
 
 app = Flask(__name__)
 jwt = JWTManager(app)
-DATABASE_URL = os.environ['DATABASE_URL']
-conn = psycopg2.connect(DATABASE_URL, sslmode='require')
-# app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://{}:{}@localhost:5432/ad_api'.format(os.getenv('DB_USER'),
-#                                                                                          os.getenv('DB_PASSWORD'))
-app.config['SQLALCHEMY_DATABASE_URI'] = conn
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://{}:{}@localhost:5432/ad_api'.format(os.getenv('DB_USER'),
+                                                                                          os.getenv('DB_PASSWORD'))
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 SALT = 'my_salt'
 db = SQLAlchemy(app)
@@ -61,7 +58,6 @@ class User(db.Model):
     def set_password(self, raw_password: str):
         raw_password = f'{raw_password}{SALT}'
         self.password = hashlib.md5(raw_password.encode()).hexdigest()
-        print(self.password)
 
     def check_password(self, raw_password: str):
         raw_password = f'{raw_password}{SALT}'
