@@ -12,11 +12,11 @@ from schema import AD_CREATE, USER_CREATE
 
 app = Flask(__name__)
 jwt = JWTManager(app)
-# Heroku_DB_URL = (subprocess.getstatusoutput('heroku config --app my-flask-api-ci'))[1].split(' ')[-1]
+Heroku_DB_URL = (subprocess.getstatusoutput('heroku config --app my-flask-api-ci'))[1].split(' ')[-1]
 # app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://{}:{}@localhost:5432/ad_api'.format(os.getenv('DB_USER'),
 #                                                                                           os.getenv('DB_PASSWORD'))
-# app.config['SQLALCHEMY_DATABASE_URI'] = Heroku_DB_URL.replace('postgres', 'postgresql+psycopg2')
-app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql+psycopg2://tvuiwgtlxdgtrg:2127c76a2a7f4fc2ae30f270fee942650a370494785ca2e5d769a807f74b7d8a@ec2-54-220-53-223.eu-west-1.compute.amazonaws.com:5432/d3aoa2h4d71pps'
+app.config['SQLALCHEMY_DATABASE_URI'] = Heroku_DB_URL.replace('postgres', 'postgresql+psycopg2')
+# app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql+psycopg2://tvuiwgtlxdgtrg:2127c76a2a7f4fc2ae30f270fee942650a370494785ca2e5d769a807f74b7d8a@ec2-54-220-53-223.eu-west-1.compute.amazonaws.com:5432/d3aoa2h4d71pps'
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 SALT = 'my_salt'
 db = SQLAlchemy(app)
