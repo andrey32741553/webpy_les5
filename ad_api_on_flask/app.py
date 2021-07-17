@@ -1,7 +1,6 @@
 import hashlib
 import datetime
 import os
-import subprocess
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
@@ -12,10 +11,9 @@ from schema import AD_CREATE, USER_CREATE
 
 app = Flask(__name__)
 jwt = JWTManager(app)
-Heroku_DB_URL = subprocess.getstatusoutput('heroku config --app my-flaskapi')[1].split(' ')[-1]
-app.config['SQLALCHEMY_DATABASE_URI'] = Heroku_DB_URL.replace('postgres', 'postgresql+psycopg2')
 # app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://{}:{}@localhost:5432/ad_api'.format(os.getenv('DB_USER'),
 #                                                                                           os.getenv('DB_PASSWORD'))
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('SQLALCHEMY_DATABASE_URI').replace('postgres', 'postgresql+psycopg2')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 SALT = 'my_salt'
 db = SQLAlchemy(app)
