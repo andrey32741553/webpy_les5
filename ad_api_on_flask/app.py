@@ -12,7 +12,8 @@ from schema import AD_CREATE, USER_CREATE
 
 app = Flask(__name__)
 jwt = JWTManager(app)
-Heroku_DB_URL = (subprocess.getstatusoutput('heroku config --app my-flask-api-ci'))[1].split(' ')[-2].split('\n')[0]
+Heroku_DB_URL = (subprocess.getstatusoutput('heroku config --app my-flask-api-ci'))[1].split(' ')[-1]#.split('\n')[0]
+print(Heroku_DB_URL)
 # app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://{}:{}@localhost:5432/ad_api'.format(os.getenv('DB_USER'),
 #                                                                                           os.getenv('DB_PASSWORD'))
 app.config['SQLALCHEMY_DATABASE_URI'] = Heroku_DB_URL.replace('postgres', 'postgresql+psycopg2')
