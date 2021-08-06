@@ -1,6 +1,2 @@
-info.txt
-Dockerfile
-/ad_api_on_flask/schema.py
-/venv/
-/.github/
-/ad_api_on_flask/tests/
+/venv
+/.idea
