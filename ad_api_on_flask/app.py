@@ -1,225 +1,251 @@
 import hashlib
 import datetime
 import os
-from flask import Flask, jsonify, request
-from flask_sqlalchemy import SQLAlchemy
-from flask_migrate import Migrate
-from jsonschema import validate
-from flask_jwt_extended import create_access_token, jwt_required, JWTManager, verify_jwt_in_request
-from schema import AD_CREATE, USER_CREATE
+from functools import partial
 
+from flask_jwt_extended import create_access_token
+from aiohttp import web
+from aiopg import pool
+from aiopg.sa import create_engine
+import sqlalchemy as sa
 
-app = Flask(__name__)
-jwt = JWTManager(app)
-# app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://{}:{}@localhost:5432/ad_api'.format(os.getenv('DB_USER'),
-#                                                                                           os.getenv('DB_PASSWORD'))
-app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv('DATABASE_URL').replace('postgres', 'postgresql+psycopg2')
-app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+routes = web.RouteTableDef()
+app = web.Application()
+SQLALCHEMY_DATABASE_URI = 'postgresql://{}:{}@localhost:5432/ad_api'.format(os.getenv('DB_USER'),
+                                                                            os.getenv('DB_PASSWORD'))
 SALT = 'my_salt'
-db = SQLAlchemy(app)
-migrate = Migrate(app,  db)
-app.config['JWT_SECRET_KEY'] = 't1NP63m4wnBg6nyHYKfmc2TpCOGI4nss'
+metadata = sa.MetaData()
+
+ads_table = sa.Table('ads', metadata, sa.Column('id', sa.Integer, primary_key=True),
+                     sa.Column('title', sa.String(100), nullable=False),
+                     sa.Column('description', sa.Text, nullable=False),
+                     sa.Column('date', sa.DateTime, default=datetime.datetime.utcnow),
+                     sa.Column('author', sa.Integer, sa.ForeignKey('user.id')))
+
+user_table = sa.Table('user', metadata, sa.Column('id', sa.Integer, primary_key=True),
+                      sa.Column('username', sa.String(64), unique=True),
+                      sa.Column('email', sa.String(120), unique=True),
+                      sa.Column('password', sa.String(128)),
+                      sa.Column('token', sa.String(500), unique=True))
 
 
-class Ad(db.Model):
-    __tablename__ = 'ads'
-    id = db.Column(db.Integer, primary_key=True)
-    title = db.Column(db.String(100), nullable=False)
-    description = db.Column(db.Text, nullable=False)
-    date = db.Column(db.DateTime, default=datetime.datetime.utcnow)
-    author = db.Column(db.Integer, db.ForeignKey('user.id'))
-
-    def __str__(self):
-        return '<Ad {}>'.format(self.title)
-
-    def __repr__(self):
-        return str(self)
-
-    def to_dict(self):
-        return {'title': self.title,
-                'description': self.description,
-                'author': self.author}
+def check_password(raw_password: str):
+    raw_password = f'{raw_password}{SALT}'
+    password = hashlib.md5(raw_password.encode()).hexdigest()
+    return password
 
 
-class User(db.Model):
-    __tablename__ = 'user'
-    id = db.Column(db.Integer, primary_key=True)
-    username = db.Column(db.String(64), index=True, unique=True)
-    email = db.Column(db.String(120), index=True, unique=True)
-    password = db.Column(db.String(128))
-    token = db.Column(db.String(500), unique=True)
-
-    def __str__(self):
-        return '<User {}>'.format(self.username)
-
-    def __repr__(self):
-        return str(self)
-
-    def set_password(self, raw_password: str):
-        raw_password = f'{raw_password}{SALT}'
-        self.password = hashlib.md5(raw_password.encode()).hexdigest()
-
-    def check_password(self, raw_password: str):
-        raw_password = f'{raw_password}{SALT}'
-        self.password = hashlib.md5(raw_password.encode()).hexdigest()
-        return self.password
-
-    def to_dict(self):
-        return {
-            'username': self.username,
-            "email": self.email
-        }
+async def register_connection(app: web.Application):
+    pg_pool = await pool.create_pool(SQLALCHEMY_DATABASE_URI)
+    app['pg_pool'] = pg_pool
+    yield
+    pg_pool.close()
 
 
-@app.route('/api/v1/user-create/', methods=['POST'], strict_slashes=False)
-def create_user():
+async def register_connection_alchemy(app: web.Application):
+    engine = await create_engine(
+        dsn=SQLALCHEMY_DATABASE_URI,
+        minsize=2,
+        maxsize=10
+    )
+
+    app['pg_engine'] = engine
+    yield
+    engine.close()
+
+
+register_connection_callback = partial(register_connection)
+
+app.cleanup_ctx.append(partial(register_connection_alchemy))
+
+app.cleanup_ctx.append(partial(register_connection_callback))
+
+
+@routes.post('/post')
+async def create_user(request):
     """ Функция создания пользователя """
-    user = User(**request.json)
-    user.set_password(request.json['password'])
+    post_data = await request.json()
     try:
-        validate(user.to_dict(), USER_CREATE)
-        db.session.add(user)
-        db.session.commit()
-        return jsonify({'status': 'CREATED'}), 201
-    except:
-        return "При добавлении пользователя произошла ошибка"
+        username = post_data['username']
+        email = post_data['email']
+        password = hashlib.md5(post_data['password'].encode()).hexdigest()
+    except KeyError:
+        raise web.HTTPBadRequest
+    engine = request.app['pg_engine']
+
+    async with engine.acquire() as conn:
+        result = await conn.execute(user_table.insert().values(username=username, email=email, password=password))
+        user = await result.fetchone()
+        return web.json_response({'user_id': user[0]})
 
 
-@jwt_required
-@app.route('/api/v1/user-info/<int:id>', methods=['GET'], strict_slashes=False)
-def user_detail(id):
+@routes.get('/{user_id}')
+async def user_detail(request):
     """ Функция вывода информации о пользователе """
-    user = User.query.get(id)
-    verify_jwt_in_request()
-    token = (dict(request.headers))['Authorization'].split(' ')[1]
-    user_info = User.query.filter_by(token=token).first()
-    if user_info is None:
-        return "Токен не существует - проверьте правильность ввода"
-    if user.id == user_info.id:
-        return jsonify(user.to_dict())
-    else:
-        return "Просматривать можно только информацию информацию о себе"
+    user_id = request.match_info['user_id']
+    pg_pool = request.app['pg_pool']
+    async with pg_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            # await cursor.execute(f'SELECT * FROM user WHERE id = {user_id};')
+            await cursor.execute(user_table.select([user_table.c.id, user_table.c.username]).select_from(user_table).
+                                 where(user_table.c.id == user_id))
+            result = await cursor.fetchone()
+            if result:
+                return web.json_response(
+                    {'id': result[0],
+                     'username': result[1]}
+                )
+    raise web.HTTPNotFound()
 
 
-@jwt_required
-@app.route('/api/v1/user-info/<int:id>/del', methods=['GET'], strict_slashes=False)
-def user_del(id):
+@routes.get('/{user_id}')
+async def user_del(request):
     """ Функция удаления пользователя """
-    user = db.session.query(User).filter_by(id=id).first()
-    if user is None:
-        return "Выбранный ID, для удаления, не существует - проверьте правильность ввода"
-    token = (dict(request.headers))['Authorization'].split(' ')[1]
-    user_info = User.query.filter_by(token=token).first()
-    if user_info is None:
-        return "Токен не существует - проверьте правильность ввода"
-    if user.id == user_info.id:
-        try:
-            verify_jwt_in_request()
-            db.session.delete(user)
-            db.session.commit()
-            return jsonify({'status': 'NO CONTENT'}), 204
-        except:
-            return "При удалении произошла ошибка"
-    else:
-        return "Удалить можно только свой аккаунт"
+    user_id = request.match_info['user_id']
+    pg_pool = request.app['pg_pool']
+    async with pg_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            # await cursor.execute(user_table.delete(user_table).where(user_table.c.id == user_id))
+            await cursor.execute(f'DELETE FROM user WHERE id = {user_id}')
+    return f"Пользователь с id = {user_id} удалён"
 
 
-@app.route('/api/v1/auth/login', methods=['POST'], strict_slashes=False)
-def login():
+@routes.post('/post')
+async def login(request):
     """ Функция авторизации пользователя с присвоением токена """
-    user = User(username=request.json['username'],
-                        password=request.json['password'], token=None)
-    authorized = user.check_password(request.json['password'])
-    if not authorized:
-        return {'error': 'Username or password invalid'}, 401
-    expires = datetime.timedelta(days=7)
-    access_token = create_access_token(identity=str(user.id), expires_delta=expires)
-    user = db.session.query(User).filter_by(username=request.json['username']).first()
-    user.token = access_token
-    db.session.commit()
-    return jsonify({'token': access_token}), 200
-
-
-@app.route('/api/v1/ad-info/<int:id>', methods=['GET'], strict_slashes=False)
-def ad_info(id):
-    """ Функция просмотра объявлений по ID """
-    ad = Ad.query.get(id)
-    if ad is None:
-        return "Выбранный ID объявления не существует - проверьте правильность ввода"
-    return jsonify(ad.to_dict())
-
-
-@jwt_required
-@app.route('/api/v1/ad-create/', methods=['POST'], strict_slashes=False)
-def create_ad():
-    """ Функция создания объявления """
-    token = (dict(request.headers))['Authorization'].split(' ')[1]
-    user_info = User.query.filter_by(token=token).first()
-    if user_info is None:
-        return "Токен не существует - проверьте правильность ввода"
-    title = request.json['title']
-    description = request.json['description']
-    author = user_info.id
-    ad = Ad(title=title, description=description, author=author)
+    post_data = await request.json()
     try:
-        verify_jwt_in_request()
-        validate(ad.to_dict(), AD_CREATE)
-        db.session.add(ad)
-        db.session.commit()
-        return jsonify({'status': 'CREATED'}), 201
-    except:
-        return "При добавлении объявления произошла ошибка"
+        username = post_data['username']
+        password = hashlib.md5(post_data['password'].encode()).hexdigest()
+        pg_pool = request.app['pg_pool']
+        authorized = check_password(password)
+        if not authorized:
+            return web.json_response({'error': 'Password invalid'})
+        expires = datetime.timedelta(days=7)
+        async with pg_pool.acquire() as conn:
+            async with conn.cursor() as cursor:
+                # result = await cursor.execute(f'SELECT * FROM user WHERE username = {username};')
+                result = await cursor.execute(user_table.select([user_table.c.id]).select_from(user_table).
+                                              where(user_table.c.username == username))
+                user = await result.fetchone()
+                if result:
+                    access_token = create_access_token(identity=str(result[0]), expires_delta=expires)
+                    user.token = access_token
+                    return web.json_response(
+                        {'token': access_token})
+    except KeyError:
+        raise web.HTTPBadRequest
 
 
-@jwt_required
-@app.route('/api/v1/ad-info/<int:id>/update/', methods=['POST'], strict_slashes=False)
-def update_ad(id):
+@routes.get('/{ad_id}')
+async def ad_info(request):
+    """ Функция просмотра объявлений по ID """
+    ad_id = request.match_info['ad_id']
+    pg_pool = request.app['pg_pool']
+    async with pg_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            # result = await cursor.execute(f'SELECT * FROM ads WHERE id = {ad_id};')
+            result = await cursor.execute(ads_table.select().where(ads_table.c.id == ad_id))
+            ad = await result.fetchone()
+            if ad is None:
+                return "Выбранный ID объявления не существует - проверьте правильность ввода"
+            return web.json_response(
+                {'ad_id': result[0],
+                 'title': result[1],
+                 'description': result[2],
+                 'date': result[3],
+                 'author': result[4]}
+            )
+
+
+@routes.post('/post')
+async def create_ad(request):
+    """ Функция создания объявления """
+    token = await (dict(request.headers))['Authorization'].split(' ')[1]
+    post_data = await request.json()
+    pg_pool = request.app['pg_pool']
+    async with pg_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            result = await cursor.execute(user_table.select()
+                                          .where(user_table.c.token == token))
+            authorized_user = await result.fetchone()
+            if authorized_user is None:
+                return "Токен не существует - проверьте правильность ввода"
+            title = post_data['title']
+            description = post_data['description']
+            author = result[1]
+            engine = request.app['pg_engine']
+            async with engine.acquire() as connection:
+                result = await connection.execute(
+                    ads_table.insert().values(title=title, description=description, author=author))
+                ad = await result.fetchone()
+                return web.json_response({'ad_id': ad[0],
+                                          'title': ad[1]})
+
+
+@routes.post('/{ad_id}')
+async def update_ad(request):
     """ Функция обновления объявления """
-    ad = db.session.query(Ad).filter_by(id=id).first()
-    if ad is None:
-        return "Выбранный ID объявления не существует - проверьте правильность ввода"
-    token = (dict(request.headers))['Authorization'].split(' ')[1]
-    user_info = User.query.filter_by(token=token).first()
-    if user_info is None:
-        return "Токен не существует - проверьте правильность ввода"
-    if ad.author == user_info.id:
-        new_title, new_description = request.json['title'], request.json['description']
-        ad.title = new_title
-        ad.description = new_description
-        ad.author = user_info.id
-        try:
-            data_for_update = Ad(title=new_title, description=new_description, author=user_info.id)
-            validate(data_for_update.to_dict(), AD_CREATE)
-            db.session.commit()
-            return jsonify({'status': 'OK'}), 200
-        except:
-            return "При редактировании статьи произошла ошибка"
-    else:
-        return "Редактировать можно только свои объявления"
+    post_data = await request.json()
+    ad_id = request.match_info['ad_id']
+    pg_pool = request.app['pg_pool']
+    async with pg_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            result = await cursor.execute(ads_table.select()
+                                          .where(ads_table.c.id == ad_id))
+            ad_info1 = await result.fetchone()
+            if ad_info1 is None:
+                return "Выбранный ID объявления не существует - проверьте правильность ввода"
+            token = await (dict(request.headers))['Authorization'].split(' ')[1]
+            async with pg_pool.acquire() as connection:
+                async with connection.cursor() as cursor1:
+                    result = await cursor1.execute(user_table.select()
+                                                   .where(user_table.c.token == token))
+                    authorized_user = await result.fetchone()
+                    if authorized_user is None:
+                        return "Токен не существует - проверьте правильность ввода"
+                    if authorized_user[0] == ad_info1[4]:
+                        await conn.execute(ads_table.update(ads_table).values({'title': post_data[1],
+                                                                               'description': post_data[2]})
+                                           .where(ads_table.c.author == authorized_user[1]))
+                    return web.json_response({'ad_id': ad_info1[0],
+                                              'title': ad_info1[1],
+                                              'description': ad_info1[2]})
 
 
-@jwt_required
-@app.route('/api/v1/ad-info/<int:id>/del', methods=['GET'], strict_slashes=False)
-def ad_del(id):
+@routes.get('/{ad_id}')
+async def ad_del(request):
     """ Функция удаления объявления """
-    ad = db.session.query(Ad).filter_by(id=id).first()
-    if ad is None:
-        return "Выбранный ID объявления не существует - проверьте правильность ввода"
-    token = (dict(request.headers))['Authorization'].split(' ')[1]
-    user_info = User.query.filter_by(token=token).first()
-    if user_info is None:
-        return "Токен не существует - проверьте правильность ввода"
-    if ad.author == user_info.id:
-        try:
-            db.session.delete(ad)
-            db.session.commit()
-            return jsonify({'status': 'NO CONTENT'}), 204
-        except:
-            return "При удалении статьи произошла ошибка"
-    else:
-        return "Удалять можно только свои объявления"
+    ad_id = request.match_info['ad_id']
+    pg_pool = request.app['pg_pool']
+    async with pg_pool.acquire() as conn:
+        async with conn.cursor() as cursor:
+            result = await cursor.execute(ads_table.select()
+                                          .where(ads_table.c.id == ad_id))
+            ad_info1 = await result.fetchone()
+            if ad_info1 is None:
+                return "Выбранный ID объявления не существует - проверьте правильность ввода"
+            token = await (dict(request.headers))['Authorization'].split(' ')[1]
+            async with pg_pool.acquire() as connection:
+                async with connection.cursor() as cursor1:
+                    result = await cursor1.execute(user_table.select()
+                                                   .where(user_table.c.token == token))
+                    authorized_user = await result.fetchone()
+                    if authorized_user is None:
+                        return "Токен не существует - проверьте правильность ввода"
+                    async with pg_pool.acquire() as c:
+                        async with c.cursor() as cursor2:
+                            await cursor2.execute(user_table.delete(ads_table).where(ads_table.c.id == ad_id))
+                    return 'Объявление удалено'
 
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
-    app.run(debug=True, host='0.0.0.0', port=port)
+    app.add_routes([web.get(r'/api/v1/user-info/{user_id:\d+}', user_detail),
+                    web.get(r'/api/v1/user-info/{user_id:\d+}/del', user_del),
+                    web.post('/api/v1/user-create/', create_user),
+                    web.post('/api/v1/auth/login', login),
+                    web.get(r'/api/v1/ad-info/{ad_id:\d+}', ad_info),
+                    web.post(r'/api/v1/ad-info/{ad_id:\d+}/update/', update_ad),
+                    web.post('/api/v1/ad-create/', create_ad),
+                    web.get(r'/api/v1/ad-info/{ad_id:\d+}/del', ad_del)])
+    web.run_app(app, host='127.0.0.1', port=8080)
