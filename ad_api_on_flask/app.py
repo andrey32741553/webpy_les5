@@ -54,6 +54,7 @@ async def register_connection_alchemy(app: web.Application):
     yield
     engine.close()
 
+
 app.cleanup_ctx.append(partial(register_connection_alchemy))
 
 
@@ -75,37 +76,47 @@ async def create_user(request):
         return web.json_response({'user_id': user[0]})
 
 
+@login_required
 @routes.get('/{user_id}')
 async def user_detail(request):
     """ Функция вывода информации о пользователе """
+    token = request.headers['Authorization'].split()[1]
     user_id = request.match_info['user_id']
     engine = request.app['pg_engine']
     async with engine.acquire() as conn:
-        async for i in conn.execute(user_table.select()):
-            if i.id == int(user_id):
-                return web.json_response(
-                    {'id': i.id,
-                     'username': i.username}
-                )
+        result = await conn.execute(user_table.select().where(user_table.c.id == int(user_id)))
+        user = await result.fetchone()
+        if user is None:
+            return web.json_response(
+                {user_id: "No such user_id"}
+            )
+        if user[4] != token:
+            return web.json_response({'message': 'Просматривать можно только информацию о себе!'})
         return web.json_response(
-            {user_id: "No such user_id"}
+            {'id': user[0],
+             'username': user[1]}
         )
 
 
+@login_required
 @routes.get('/{user_id}')
 async def user_del(request):
     """ Функция удаления пользователя """
+    token = request.headers['Authorization'].split()[1]
     user_id = request.match_info['user_id']
     engine = request.app['pg_engine']
     async with engine.acquire() as conn:
-        async for i in conn.execute(user_table.select()):
-            if i.id == int(user_id):
-                await conn.execute(user_table.delete().where(user_table.c.id == int(user_id)))
-                return web.json_response(
-                    {user_id: "User deleted"}
-                )
+        result = await conn.execute(user_table.select().where(user_table.c.id == int(user_id)))
+        user = await result.fetchone()
+        if user is None:
+            return web.json_response(
+                {user_id: "No such user_id"}
+            )
+        if user[4] != token:
+            return web.json_response({'message': 'Удалять можно только информацию о себе!'})
+        await conn.execute(user_table.delete().where(user_table.c.id == int(user_id)))
         return web.json_response(
-            {user_id: "No such user_id"}
+            {user_id: "User deleted"}
         )
 
 
@@ -193,6 +204,8 @@ async def update_ad(request):
         authorized_user = await result.fetchone()
         if authorized_user is None:
             return web.json_response({"Token": "Пользователь не авторизован"})
+        if authorized_user[0] != ad_info_for_upd[4]:
+            return web.json_response({'message': 'Обновлять можно только свои объявления!'})
         post_data = await request.json()
         await conn.execute(sa.update(ads_table).values({'title': post_data['title'],
                                                         'description': post_data['description']})
@@ -220,17 +233,19 @@ async def ad_del(request):
         authorized_user = await result.fetchone()
         if authorized_user is None:
             return web.json_response({"token": "Токен не существует - проверьте правильность ввода"})
+        if authorized_user[0] != ad_info1[4]:
+            return web.json_response({'message': 'Удалять можно только свои объявления!'})
         await conn.execute(ads_table.delete().where(ads_table.c.id == int(ad_id)))
         return web.json_response({'message': 'Объявление удалено'})
 
 
 if __name__ == '__main__':
-    app.add_routes([web.get(r'/api/v1/user-info/{user_id:\d+}', user_detail),
-                    web.get(r'/api/v1/user-info/{user_id:\d+}/del', user_del),
+    app.add_routes([web.get(r'/api/v1/user-info/{user_id:\d+}/', user_detail),
+                    web.get(r'/api/v1/user-info/{user_id:\d+}/del/', user_del),
                     web.post('/api/v1/user-create/', create_user),
-                    web.post('/api/v1/auth/login', login),
-                    web.get(r'/api/v1/ad-info/{ad_id:\d+}', ad_info),
+                    web.post('/api/v1/auth/login/', login),
+                    web.get(r'/api/v1/ad-info/{ad_id:\d+}/', ad_info),
                     web.post(r'/api/v1/ad-info/{ad_id:\d+}/update/', update_ad),
                     web.post('/api/v1/ad-create/', create_ad),
-                    web.get(r'/api/v1/ad-info/{ad_id:\d+}/del', ad_del)])
+                    web.get(r'/api/v1/ad-info/{ad_id:\d+}/del/', ad_del)])
     web.run_app(app, host='127.0.0.1', port=8080)
